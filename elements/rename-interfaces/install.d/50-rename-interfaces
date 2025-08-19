@@ -1,0 +1,59 @@
+#!/bin/bash
+
+if [ "${DIB_DEBUG_TRACE:-0}" -gt 0 ]; then
+  set -x
+fi
+set -eu
+set -o pipefail
+
+# Create the udev rules directory if it doesn't exist
+mkdir -p "/etc/udev/rules.d"
+
+# Function to generate default placeholder mappings
+generate_default_mappings() {
+  cat <<'EOF'
+[
+  {"kernels": "0000:XX:00.0", "vendor": "0xVVVV", "device": "0xDDDD", "name": "ethX"},
+  {"kernels": "0000:XX:00.1", "vendor": "0xVVVV", "device": "0xDDDD", "name": "ethY"}
+]
+EOF
+}
+
+# Get interface mappings from environment variable or use defaults
+INTERFACE_MAPPINGS="${DIB_INTERFACE_MAPPINGS:-$(generate_default_mappings)}"
+
+# Parse the JSON mappings and generate udev rules
+echo "# Generated udev rules for network interface renaming" >"/etc/udev/rules.d/70-persistent-net.rules"
+echo "# Configuration source: ${DIB_INTERFACE_MAPPINGS:+DIB_INTERFACE_MAPPINGS environment variable}" >>"/etc/udev/rules.d/70-persistent-net.rules"
+echo "# Configuration source: ${DIB_INTERFACE_MAPPINGS:-default placeholder values}" >>"/etc/udev/rules.d/70-persistent-net.rules"
+echo "" >>"/etc/udev/rules.d/70-persistent-net.rules"
+
+# Use Python to parse JSON and generate rules (Python is available in DIB environment)
+python3 -c "
+import json
+import sys
+
+try:
+    mappings = json.loads('''$INTERFACE_MAPPINGS''')
+    for mapping in mappings:
+        kernels = mapping.get('kernels', '')
+        vendor = mapping.get('vendor', '')
+        device = mapping.get('device', '')
+        name = mapping.get('name', '')
+        
+        if all([kernels, vendor, device, name]):
+            rule = f'SUBSYSTEM==\"net\", ACTION==\"add\", KERNELS==\"{kernels}\", ATTRS{{vendor}}==\"{vendor}\", ATTRS{{device}}==\"{device}\", NAME=\"{name}\"'
+            print(rule)
+        else:
+            print(f'# Warning: Incomplete mapping - kernels: {kernels}, vendor: {vendor}, device: {device}, name: {name}', file=sys.stderr)
+except json.JSONDecodeError as e:
+    print(f'Error parsing DIB_INTERFACE_MAPPINGS: {e}', file=sys.stderr)
+    sys.exit(1)
+except Exception as e:
+    print(f'Error processing interface mappings: {e}', file=sys.stderr)
+    sys.exit(1)
+" >>"/etc/udev/rules.d/70-persistent-net.rules"
+
+# Set correct permissions
+chmod 0644 "/etc/udev/rules.d/70-persistent-net.rules"
+
